@@ -26,7 +26,8 @@ Key gameplay challenge: Can players collect and craft tokens from nearby locatio
 - [ ] draw the player's location on the map
 - [ ] draw a rectangle representing one cell on the map
 - [ ] use loops to draw a whole grid of cells on the map
-- ...
+- [ ] inventory system
+- [ ] crafting system
 
 ## D3.b: ...
 
