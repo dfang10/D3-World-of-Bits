@@ -49,3 +49,8 @@ leaflet
       '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>',
   })
   .addTo(map);
+
+// Player location
+const playerLocation = leaflet.marker(CLASSROOM_LATLNG);
+playerLocation.bindTooltip("You are here.");
+playerLocation.addTo(map);
