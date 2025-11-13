@@ -30,8 +30,8 @@ Key gameplay challenge: Can players collect and craft tokens from nearby locatio
 
 ## D3.b: Global spanning gameplay (player movement and token spawning)
 
-- [] create buttons for player movement
-- [] create token popups on edge of map as player moves and despawn them when the player is out of view
-- [] memoryless cells
+- [x] create buttons for player movement
+- [x] create token popups on edge of map as player moves and despawn them when the player is out of view
+- [x] memoryless cells
 
 ### 

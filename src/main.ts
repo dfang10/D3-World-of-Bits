@@ -1,17 +1,11 @@
 // @deno-types="npm:@types/leaflet"
 import leaflet from "leaflet";
-
-// Style sheets
 import "leaflet/dist/leaflet.css";
 import "./style.css";
-
-// Fix missing marker images
 import "./_leafletWorkaround.ts";
-
 import luck from "./_luck.ts";
 
 // Create basic UI elements
-
 const mapDiv = document.createElement("div");
 mapDiv.id = "map";
 document.body.append(mapDiv);
@@ -29,7 +23,7 @@ const CLASSROOM_LATLNG = leaflet.latLng(
 // Tunable gameplay parameters
 const GAMEPLAY_ZOOM_LEVEL = 19;
 const TILE_DEGREES = 1e-4;
-const NEIGHBORHOOD_SIZE = 8;
+const VISIBLE_RADIUS = 25;
 const CACHE_SPAWN_PROBABILITY = 0.1;
 
 // Token data
@@ -38,12 +32,32 @@ type Token = {
   value: number;
   i: number;
   j: number;
-  rect?: leaflet.Rectangle; //
+  rect?: leaflet.Rectangle;
 };
+
+// For getting lat and long
+interface GridCell {
+  i: number;
+  j: number;
+}
+
+interface CellData {
+  tokens: Token[];
+  lastVisited?: number;
+}
 
 let heldToken: Token | null = null;
 
-// Create the map (element with id "map" is defined in index.html)
+// Keeps track of cells that are loaded
+const activeCells = new Map<string, CellData>();
+const visibleBounds = {
+  iMin: 0,
+  iMax: 0,
+  jMin: 0,
+  jMax: 0,
+};
+
+// Create the map
 const map = leaflet.map(mapDiv, {
   center: CLASSROOM_LATLNG,
   zoom: GAMEPLAY_ZOOM_LEVEL,
@@ -67,16 +81,153 @@ const playerLocation = leaflet.marker(CLASSROOM_LATLNG);
 playerLocation.bindTooltip("You are here.");
 playerLocation.addTo(map);
 
-// Function to create tokens around map
+// Function to convert world coords to grid coords
+function convertLatLong(lat: number, lng: number): GridCell {
+  const origin = CLASSROOM_LATLNG;
+  return {
+    i: Math.floor((lat - origin.lat) / TILE_DEGREES),
+    j: Math.floor((lng - origin.lng) / TILE_DEGREES),
+  };
+}
+
+function createBoundary(cell: GridCell): leaflet.LatLngBounds {
+  const origin = CLASSROOM_LATLNG;
+  return leaflet.latLngBounds([
+    [origin.lat + cell.i * TILE_DEGREES, origin.lng + cell.j * TILE_DEGREES],
+    [
+      origin.lat + (cell.i + 1) * TILE_DEGREES,
+      origin.lng + (cell.j + 1) * TILE_DEGREES,
+    ],
+  ]);
+}
+
+// Identify each grid
+function getCellKey(cell: GridCell): string {
+  return `${cell.i},${cell.j}`;
+}
+
+// Function to create tokens
 function createToken(i: number, j: number): Token {
   const value = Math.random() < 0.5 ? 2 : 4;
-  return { id: `${i},${j}`, value, i, j };
+  return { id: `${i},${j}-${Date.now()}`, value, i, j };
+}
+
+// Function to spawn a token in the world
+function spawnToken(token: Token) {
+  const bounds = createBoundary({ i: token.i, j: token.j });
+  const rect = leaflet.rectangle(bounds, { color: "red" }).addTo(map);
+  token.rect = rect;
+
+  rect.bindPopup(() => {
+    const div = document.createElement("div");
+
+    if (!heldToken) {
+      const tokenInfo = document.createElement("div");
+      tokenInfo.textContent = `Token value: ${token.value}`;
+      div.appendChild(tokenInfo);
+
+      const pickupButton = document.createElement("button");
+      pickupButton.textContent = "Pick up";
+      pickupButton.onclick = () => {
+        heldToken = token;
+        map.removeLayer(rect);
+        const cellKey = getCellKey({ i: token.i, j: token.j });
+        const cellData = activeCells.get(cellKey);
+        if (cellData) {
+          cellData.tokens = cellData.tokens.filter((t) => t.id !== token.id);
+        }
+        updateInventory();
+      };
+      div.appendChild(pickupButton);
+    } else if (heldToken.value === token.value) {
+      const combineInfo = document.createElement("div");
+      combineInfo.textContent =
+        `Combine ${heldToken.value} with ${token.value}?`;
+      div.appendChild(combineInfo);
+
+      const combineButton = document.createElement("button");
+      combineButton.textContent = "Combine";
+      combineButton.onclick = () => combineTokens(token);
+      div.appendChild(combineButton);
+    } else {
+      const notMatch = document.createElement("div");
+      notMatch.textContent =
+        `Cannot combine ${token.value} with ${heldToken.value}.`;
+      div.appendChild(notMatch);
+    }
+    return div;
+  });
+
+  // Respawn tokens when player moves away
+  const cellKey = getCellKey({ i: token.i, j: token.j });
+  if (!activeCells.has(cellKey)) {
+    activeCells.set(cellKey, { tokens: [] });
+  }
+  activeCells.get(cellKey)!.tokens.push(token);
+}
+
+// Calculate which cells should appear while player is there
+function updateVisibleCells() {
+  const centerCell = convertLatLong(map.getCenter().lat, map.getCenter().lng);
+
+  const newBounds = {
+    iMin: centerCell.i - VISIBLE_RADIUS,
+    iMax: centerCell.i + VISIBLE_RADIUS,
+    jMin: centerCell.j - VISIBLE_RADIUS,
+    jMax: centerCell.j + VISIBLE_RADIUS,
+  };
+
+  // Remove cells that are no longer visible
+  for (const [cellKey, cellData] of activeCells.entries()) {
+    const [i, j] = cellKey.split(",").map(Number);
+    if (
+      i < newBounds.iMin || i > newBounds.iMax || j < newBounds.jMin ||
+      j > newBounds.jMax
+    ) {
+      cellData.tokens.forEach((token) => {
+        if (token.rect) {
+          map.removeLayer(token.rect);
+        }
+      });
+      activeCells.delete(cellKey);
+    }
+  }
+
+  // Add new cells that are now visible
+  for (let i = newBounds.iMin; i <= newBounds.iMax; i++) {
+    for (let j = newBounds.jMin; j <= newBounds.jMax; j++) {
+      const cellKey = getCellKey({ i, j });
+
+      if (!activeCells.has(cellKey)) {
+        activeCells.set(cellKey, { tokens: [] });
+
+        if (luck([i, j].toString()) < CACHE_SPAWN_PROBABILITY) {
+          const token = createToken(i, j);
+          spawnToken(token);
+        }
+      }
+    }
+  }
+
+  visibleBounds.iMin = newBounds.iMin;
+  visibleBounds.iMax = newBounds.iMax;
+  visibleBounds.jMin = newBounds.jMin;
+  visibleBounds.jMax = newBounds.jMax;
 }
 
 // Function for when the player drops token
 function dropToken() {
   if (!heldToken) return;
-  spawnToken(heldToken);
+
+  const playerCell = convertLatLong(map.getCenter().lat, map.getCenter().lng);
+  const dropToken: Token = {
+    ...heldToken,
+    i: playerCell.i,
+    j: playerCell.j,
+    id: `${playerCell.i},${playerCell.j}-${Date.now()}`,
+  };
+
+  spawnToken(dropToken);
   heldToken = null;
   updateInventory();
 }
@@ -101,56 +252,6 @@ function updateInventory() {
   }
 }
 
-// Function to spawn tokens
-function spawnToken(token: Token) {
-  const origin = CLASSROOM_LATLNG;
-  const bounds = leaflet.latLngBounds([
-    [origin.lat + token.i * TILE_DEGREES, origin.lng + token.j * TILE_DEGREES],
-    [
-      origin.lat + (token.i + 1) * TILE_DEGREES,
-      origin.lng + (token.j + 1) * TILE_DEGREES,
-    ],
-  ]);
-
-  const rect = leaflet.rectangle(bounds, { color: "red" }).addTo(map);
-  token.rect = rect;
-
-  rect.bindPopup(() => {
-    const div = document.createElement("div");
-
-    if (!heldToken) {
-      const tokenInfo = document.createElement("div");
-      tokenInfo.textContent = `Token value: ${token.value}`;
-      div.appendChild(tokenInfo);
-
-      const pickupButton = document.createElement("button");
-      pickupButton.textContent = "Pick up";
-      pickupButton.onclick = () => {
-        heldToken = token;
-        map.removeLayer(rect);
-        updateInventory();
-      };
-      div.appendChild(pickupButton);
-    } else if (heldToken.value === token.value) {
-      const combineInfo = document.createElement("div");
-      combineInfo.textContent =
-        `Combine ${heldToken.value} with ${token.value}?`;
-      div.appendChild(combineInfo);
-
-      const combineButton = document.createElement("button");
-      combineButton.textContent = "Combine";
-      combineButton.onclick = () => combineTokens(token);
-      div.appendChild(combineButton);
-    } else {
-      const notMatch = document.createElement("div");
-      notMatch.textContent =
-        `Cannot combine ${token.value} with ${heldToken.value}.`;
-      div.appendChild(notMatch);
-    }
-    return div;
-  });
-}
-
 // Function for combining tokens
 function combineTokens(target: Token) {
   if (!heldToken || heldToken.value !== target.value) return;
@@ -159,13 +260,20 @@ function combineTokens(target: Token) {
   if (target.rect) {
     map.removeLayer(target.rect);
   }
-  const combinedToken: Token = { //
+
+  const cellKey = getCellKey({ i: target.i, j: target.j });
+  const cellData = activeCells.get(cellKey);
+  if (cellData) {
+    cellData.tokens = cellData.tokens.filter((t) => t.id !== target.id);
+  }
+
+  const combinedToken: Token = {
     ...target,
     value: combinedValue,
+    id: `${target.i},${target.j}-${Date.now()}`,
   };
 
   spawnToken(combinedToken);
-
   heldToken = null;
   updateInventory();
 
@@ -174,13 +282,38 @@ function combineTokens(target: Token) {
   }
 }
 
-for (let i = -NEIGHBORHOOD_SIZE; i < NEIGHBORHOOD_SIZE; i++) {
-  for (let j = -NEIGHBORHOOD_SIZE; j < NEIGHBORHOOD_SIZE; j++) {
-    if (luck([i, j].toString()) < CACHE_SPAWN_PROBABILITY) {
-      const token = createToken(i, j);
-      spawnToken(token);
-    }
-  }
+// Movement buttons
+function createMovementButtons() {
+  const buttonContainer = document.createElement("div");
+  buttonContainer.id = "movementButtons";
+  buttonContainer.style.position = "absolute";
+  buttonContainer.style.top = "10px";
+  buttonContainer.style.right = "10px";
+  buttonContainer.style.zIndex = "1000";
+
+  const directions = [
+    { name: "North", lat: TILE_DEGREES, lng: 0 },
+    { name: "South", lat: -TILE_DEGREES, lng: 0 },
+    { name: "East", lat: 0, lng: TILE_DEGREES },
+    { name: "West", lat: 0, lng: -TILE_DEGREES },
+  ];
+
+  directions.forEach((dir) => {
+    const button = document.createElement("button");
+    button.textContent = dir.name;
+    button.style.margin = "5px";
+    button.onclick = () => {
+      const currentCenter = map.getCenter();
+      map.setView([currentCenter.lat + dir.lat, currentCenter.lng + dir.lng]);
+    };
+    buttonContainer.appendChild(button);
+  });
+
+  document.body.appendChild(buttonContainer);
 }
 
+createMovementButtons();
+updateVisibleCells();
 updateInventory();
+
+map.on("moveend", updateVisibleCells);
