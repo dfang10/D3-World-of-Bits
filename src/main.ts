@@ -231,7 +231,7 @@ function updateVisibleCells() {
   };
 
   // STEP 1: Clean up all visible elements (complete rebuild)
-  for (const [cellKey, cellData] of activeCells.entries()) {
+  for (const [_cellKey, cellData] of activeCells.entries()) {
     cellData.visualElements.forEach((rect) => {
       map.removeLayer(rect);
     });
