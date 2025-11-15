@@ -41,15 +41,24 @@ interface GridCell {
   j: number;
 }
 
-interface CellData {
+// Flyweight
+interface CellState {
+  modified: boolean;
+  baseTokens: Token[];
+}
+
+interface ActiveCell {
   tokens: Token[];
-  lastVisited?: number;
+  visualElements: leaflet.Rectangle[];
 }
 
 let heldToken: Token | null = null;
 
-// Keeps track of cells that are loaded
-const activeCells = new Map<string, CellData>();
+const modifiedCells = new Map<string, CellState>(); // Cells player modifies
+
+const activeCells = new Map<string, ActiveCell>(); // Cells on screen
+
+// Boundries of token spawns
 const visibleBounds = {
   iMin: 0,
   iMax: 0,
@@ -112,10 +121,38 @@ function createToken(i: number, j: number): Token {
   return { id: `${i},${j}-${Date.now()}`, value, i, j };
 }
 
-// Function to spawn a token in the world
-function spawnToken(token: Token) {
+// Check if token has been motified
+function tokenModified(cellKey: string): boolean {
+  return modifiedCells.has(cellKey) && modifiedCells.get(cellKey)!.modified;
+}
+
+// Save the current state of cells
+function saveCell(cellKey: string, tokens: Token[]) {
+  modifiedCells.set(cellKey, {
+    modified: true,
+    baseTokens: tokens.map((token) => ({
+      ...token,
+    })),
+  });
+}
+
+// Load the cells
+function loadCell(cellKey: string): Token[] {
+  const state = modifiedCells.get(cellKey);
+  if (!state) return [];
+
+  return state.baseTokens.map((token) => ({
+    ...token,
+  }));
+}
+
+// Spawn token function
+function spawnToken(token: Token, isPlayerModified: boolean = false) {
   const bounds = createBoundary({ i: token.i, j: token.j });
-  const rect = leaflet.rectangle(bounds, { color: "red" }).addTo(map);
+  const rect = leaflet.rectangle(bounds, {
+    color: isPlayerModified ? "green" : "red",
+  }).addTo(map);
+
   token.rect = rect;
 
   rect.bindPopup(() => {
@@ -129,14 +166,7 @@ function spawnToken(token: Token) {
       const pickupButton = document.createElement("button");
       pickupButton.textContent = "Pick up";
       pickupButton.onclick = () => {
-        heldToken = token;
-        map.removeLayer(rect);
-        const cellKey = getCellKey({ i: token.i, j: token.j });
-        const cellData = activeCells.get(cellKey);
-        if (cellData) {
-          cellData.tokens = cellData.tokens.filter((t) => t.id !== token.id);
-        }
-        updateInventory();
+        tokenPickup(token);
       };
       div.appendChild(pickupButton);
     } else if (heldToken.value === token.value) {
@@ -158,15 +188,38 @@ function spawnToken(token: Token) {
     return div;
   });
 
-  // Respawn tokens when player moves away
+  // Register token in active cell
   const cellKey = getCellKey({ i: token.i, j: token.j });
   if (!activeCells.has(cellKey)) {
-    activeCells.set(cellKey, { tokens: [] });
+    activeCells.set(cellKey, { tokens: [], visualElements: [] });
   }
-  activeCells.get(cellKey)!.tokens.push(token);
+
+  const cellData = activeCells.get(cellKey)!;
+  cellData.tokens.push(token);
+  cellData.visualElements.push(rect);
 }
 
-// Calculate which cells should appear while player is there
+// Function for token pick up
+function tokenPickup(token: Token) {
+  const cellKey = getCellKey({ i: token.i, j: token.j });
+  const cellData = activeCells.get(cellKey);
+
+  if (cellData) {
+    cellData.tokens = cellData.tokens.filter((t) => t.id !== token.id);
+    if (token.rect) {
+      map.removeLayer(token.rect);
+      cellData.visualElements = cellData.visualElements.filter((rect) =>
+        rect !== token.rect
+      );
+    }
+    saveCell(cellKey, cellData.tokens);
+  }
+
+  heldToken = token;
+  updateInventory();
+}
+
+// Function to update the visible cells
 function updateVisibleCells() {
   const centerCell = convertLatLong(map.getCenter().lat, map.getCenter().lng);
 
@@ -177,33 +230,37 @@ function updateVisibleCells() {
     jMax: centerCell.j + VISIBLE_RADIUS,
   };
 
-  // Remove cells that are no longer visible
+  // STEP 1: Clean up all visible elements (complete rebuild)
   for (const [cellKey, cellData] of activeCells.entries()) {
-    const [i, j] = cellKey.split(",").map(Number);
-    if (
-      i < newBounds.iMin || i > newBounds.iMax || j < newBounds.jMin ||
-      j > newBounds.jMax
-    ) {
-      cellData.tokens.forEach((token) => {
-        if (token.rect) {
-          map.removeLayer(token.rect);
-        }
-      });
-      activeCells.delete(cellKey);
-    }
+    cellData.visualElements.forEach((rect) => {
+      map.removeLayer(rect);
+    });
   }
 
-  // Add new cells that are now visible
+  activeCells.clear();
+
   for (let i = newBounds.iMin; i <= newBounds.iMax; i++) {
     for (let j = newBounds.jMin; j <= newBounds.jMax; j++) {
       const cellKey = getCellKey({ i, j });
 
-      if (!activeCells.has(cellKey)) {
-        activeCells.set(cellKey, { tokens: [] });
+      activeCells.set(cellKey, { tokens: [], visualElements: [] });
 
+      if (tokenModified(cellKey)) {
+        const savedTokens = loadCell(cellKey);
+
+        savedTokens.forEach((token) => {
+          const freshToken = {
+            ...token,
+            i,
+            j,
+            id: `${i},${j}-${Date.now()}`,
+          };
+          spawnToken(freshToken, true);
+        });
+      } else {
         if (luck([i, j].toString()) < CACHE_SPAWN_PROBABILITY) {
           const token = createToken(i, j);
-          spawnToken(token);
+          spawnToken(token, false);
         }
       }
     }
@@ -215,19 +272,26 @@ function updateVisibleCells() {
   visibleBounds.jMax = newBounds.jMax;
 }
 
-// Function for when the player drops token
+// Drop token function
 function dropToken() {
   if (!heldToken) return;
 
   const playerCell = convertLatLong(map.getCenter().lat, map.getCenter().lng);
-  const dropToken: Token = {
+  const droppedToken: Token = {
     ...heldToken,
     i: playerCell.i,
     j: playerCell.j,
     id: `${playerCell.i},${playerCell.j}-${Date.now()}`,
   };
 
-  spawnToken(dropToken);
+  const cellKey = getCellKey(playerCell);
+
+  spawnToken(droppedToken, true);
+
+  // MEMENTO: Save to persistent storage
+  const cellData = activeCells.get(cellKey)!;
+  saveCell(cellKey, cellData.tokens);
+
   heldToken = null;
   updateInventory();
 }
@@ -251,29 +315,35 @@ function updateInventory() {
     statusPanelDiv.appendChild(emptyLabel);
   }
 }
-
-// Function for combining tokens
+// Combining token function
 function combineTokens(target: Token) {
   if (!heldToken || heldToken.value !== target.value) return;
+
   const combinedValue = target.value * 2;
-
-  if (target.rect) {
-    map.removeLayer(target.rect);
-  }
-
   const cellKey = getCellKey({ i: target.i, j: target.j });
+
   const cellData = activeCells.get(cellKey);
   if (cellData) {
     cellData.tokens = cellData.tokens.filter((t) => t.id !== target.id);
+    if (target.rect) {
+      map.removeLayer(target.rect);
+      cellData.visualElements = cellData.visualElements.filter((rect) =>
+        rect !== target.rect
+      );
+    }
   }
 
+  // Create combined token
   const combinedToken: Token = {
     ...target,
     value: combinedValue,
     id: `${target.i},${target.j}-${Date.now()}`,
   };
 
-  spawnToken(combinedToken);
+  spawnToken(combinedToken, true);
+
+  saveCell(cellKey, activeCells.get(cellKey)!.tokens);
+
   heldToken = null;
   updateInventory();
 

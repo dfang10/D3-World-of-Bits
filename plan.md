@@ -34,4 +34,9 @@ Key gameplay challenge: Can players collect and craft tokens from nearby locatio
 - [x] create token popups on edge of map as player moves and despawn them when the player is out of view
 - [x] memoryless cells
 
+## D3.c: Object persistence
+
+- [x] implement flyweight pattern to cells so cells that haven't been interacted with don't require memory to store them
+- [x] implement modifying cells states staying if they aren't on the screen
+
 ### 
