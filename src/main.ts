@@ -5,6 +5,151 @@ import "./style.css";
 import "./_leafletWorkaround.ts";
 import luck from "./_luck.ts";
 
+// Facade pattern
+interface MovementController {
+  start(): void;
+  stop(): void;
+  getCurrentPosition(): leaflet.LatLng | null;
+  isAvailable(): boolean;
+}
+
+// Button movement
+class ButtonMovementController implements MovementController {
+  private currentPosition: leaflet.LatLng;
+
+  constructor(initialPosition: leaflet.LatLng) {
+    this.currentPosition = initialPosition;
+  }
+
+  start(): void {
+    console.log("Button movement started");
+  }
+
+  stop(): void {
+    console.log("Button movement stoped");
+  }
+
+  getCurrentPosition(): leaflet.LatLng {
+    return this.currentPosition;
+  }
+
+  setCurrentPosition(position: leaflet.LatLng): void {
+    this.currentPosition = position;
+  }
+
+  isAvailable(): boolean {
+    return true;
+  }
+}
+
+// Real world location
+class GeolocationMovementController implements MovementController {
+  private currentPosition: leaflet.LatLng | null = null;
+  private watchId: number | null = null;
+
+  constructor(initialPosition: leaflet.LatLng) {
+    this.currentPosition = initialPosition;
+  }
+
+  start(): void {
+    if (this.watchId !== null) return;
+
+    if ("geolocation" in navigator) {
+      this.watchId = navigator.geolocation.watchPosition(
+        (position) => {
+          this.currentPosition = leaflet.latLng(
+            position.coords.latitude,
+            position.coords.longitude,
+          );
+          console.log("Geolocation updated:", this.currentPosition);
+          map.setView(this.currentPosition);
+          updateVisibleCells();
+        },
+        (error) => {
+          console.error("Geolocation error:", error);
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 1000,
+          timeout: 5000,
+        },
+      );
+    }
+  }
+
+  stop(): void {
+    if (this.watchId !== null) {
+      navigator.geolocation.clearWatch(this.watchId);
+      this.watchId = null;
+    }
+  }
+
+  getCurrentPosition(): leaflet.LatLng | null {
+    return this.currentPosition;
+  }
+
+  isAvailable(): boolean {
+    return "geolocation" in navigator;
+  }
+}
+
+interface SerializedToken {
+  id: string;
+  value: number;
+  i: number;
+  j: number;
+}
+
+interface CellState {
+  hasBeenModified: boolean;
+  baseTokens: SerializedToken[];
+}
+
+interface GameState {
+  persistentCells: Array<[string, CellState]>;
+  playerPosition: { lat: number; lng: number };
+  heldToken: SerializedToken | null;
+  movementType: "buttons" | "geolocation";
+}
+
+class GameStorage {
+  private static readonly STORAGE_KEY = "tokenGameState";
+
+  static saveGameState(state: GameState): void {
+    try {
+      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(state));
+      console.log("Game state saved");
+    } catch (error) {
+      console.error("Failed to save game state:", error);
+    }
+  }
+
+  static loadGameState(): GameState | null {
+    try {
+      const saved = localStorage.getItem(this.STORAGE_KEY);
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch (error) {
+      console.error("Failed to load game state:", error);
+    }
+    return null;
+  }
+
+  static clearGameState(): void {
+    try {
+      localStorage.removeItem(this.STORAGE_KEY);
+      console.log("Game state cleared");
+    } catch (error) {
+      console.error("Failed to clear game state:", error);
+    }
+  }
+
+  static hasSavedGame(): boolean {
+    return localStorage.getItem(this.STORAGE_KEY) !== null;
+  }
+}
+
 // Create basic UI elements
 const mapDiv = document.createElement("div");
 mapDiv.id = "map";
@@ -41,24 +186,19 @@ interface GridCell {
   j: number;
 }
 
-// Flyweight
-interface CellState {
-  modified: boolean;
-  baseTokens: Token[];
-}
-
-interface ActiveCell {
-  tokens: Token[];
-  visualElements: leaflet.Rectangle[];
-}
-
 let heldToken: Token | null = null;
 
-const modifiedCells = new Map<string, CellState>(); // Cells player modifies
+// Movement controller
+let movementController: MovementController;
+let currentMovementType: "buttons" | "geolocation" = "buttons";
 
-const activeCells = new Map<string, ActiveCell>(); // Cells on screen
+// Persistent and active cell storage
+const persistentCells = new Map<string, CellState>();
+const activeCells = new Map<
+  string,
+  { tokens: Token[]; visualElements: leaflet.Rectangle[] }
+>();
 
-// Boundries of token spawns
 const visibleBounds = {
   iMin: 0,
   iMax: 0,
@@ -121,38 +261,39 @@ function createToken(i: number, j: number): Token {
   return { id: `${i},${j}-${Date.now()}`, value, i, j };
 }
 
-// Check if token has been motified
-function tokenModified(cellKey: string): boolean {
-  return modifiedCells.has(cellKey) && modifiedCells.get(cellKey)!.modified;
-}
-
-// Save the current state of cells
-function saveCell(cellKey: string, tokens: Token[]) {
-  modifiedCells.set(cellKey, {
-    modified: true,
-    baseTokens: tokens.map((token) => ({
-      ...token,
-    })),
+// MEMENTO: Save cell state to persistent storage
+function saveCellState(cellKey: string, tokens: Token[]) {
+  persistentCells.set(cellKey, {
+    hasBeenModified: true,
+    baseTokens: tokens.map((token) => {
+      const { ...serializedToken } = token;
+      return serializedToken;
+    }),
   });
 }
 
-// Load the cells
-function loadCell(cellKey: string): Token[] {
-  const state = modifiedCells.get(cellKey);
+// MEMENTO: Load cell state from persistent storage
+function loadCellState(cellKey: string): Token[] {
+  const state = persistentCells.get(cellKey);
   if (!state) return [];
 
-  return state.baseTokens.map((token) => ({
-    ...token,
+  return state.baseTokens.map((serializedToken) => ({
+    ...serializedToken,
   }));
 }
 
-// Spawn token function
+// MEMENTO: Check if cell has been modified by player
+function cellModified(cellKey: string): boolean {
+  return persistentCells.has(cellKey) &&
+    persistentCells.get(cellKey)!.hasBeenModified;
+}
+
+// Function to spawn a token in the world
 function spawnToken(token: Token, isPlayerModified: boolean = false) {
   const bounds = createBoundary({ i: token.i, j: token.j });
   const rect = leaflet.rectangle(bounds, {
-    color: isPlayerModified ? "green" : "red",
+    color: isPlayerModified ? "blue" : "red",
   }).addTo(map);
-
   token.rect = rect;
 
   rect.bindPopup(() => {
@@ -166,7 +307,7 @@ function spawnToken(token: Token, isPlayerModified: boolean = false) {
       const pickupButton = document.createElement("button");
       pickupButton.textContent = "Pick up";
       pickupButton.onclick = () => {
-        tokenPickup(token);
+        handleTokenPickup(token);
       };
       div.appendChild(pickupButton);
     } else if (heldToken.value === token.value) {
@@ -199,8 +340,8 @@ function spawnToken(token: Token, isPlayerModified: boolean = false) {
   cellData.visualElements.push(rect);
 }
 
-// Function for token pick up
-function tokenPickup(token: Token) {
+// Enhanced token pickup with persistence
+function handleTokenPickup(token: Token) {
   const cellKey = getCellKey({ i: token.i, j: token.j });
   const cellData = activeCells.get(cellKey);
 
@@ -212,16 +353,22 @@ function tokenPickup(token: Token) {
         rect !== token.rect
       );
     }
-    saveCell(cellKey, cellData.tokens);
+
+    // MEMENTO: Save updated state to persistent storage
+    saveCellState(cellKey, cellData.tokens);
   }
 
   heldToken = token;
   updateInventory();
+  saveGameState();
 }
 
-// Function to update the visible cells
+// Calculate which cells should appear while player is there
 function updateVisibleCells() {
-  const centerCell = convertLatLong(map.getCenter().lat, map.getCenter().lng);
+  const position = movementController.getCurrentPosition();
+  if (!position) return;
+
+  const centerCell = convertLatLong(position.lat, position.lng);
 
   const newBounds = {
     iMin: centerCell.i - VISIBLE_RADIUS,
@@ -230,7 +377,6 @@ function updateVisibleCells() {
     jMax: centerCell.j + VISIBLE_RADIUS,
   };
 
-  // STEP 1: Clean up all visible elements (complete rebuild)
   for (const [_cellKey, cellData] of activeCells.entries()) {
     cellData.visualElements.forEach((rect) => {
       map.removeLayer(rect);
@@ -239,14 +385,16 @@ function updateVisibleCells() {
 
   activeCells.clear();
 
+  // Rebuild visible area from data
   for (let i = newBounds.iMin; i <= newBounds.iMax; i++) {
     for (let j = newBounds.jMin; j <= newBounds.jMax; j++) {
       const cellKey = getCellKey({ i, j });
 
       activeCells.set(cellKey, { tokens: [], visualElements: [] });
 
-      if (tokenModified(cellKey)) {
-        const savedTokens = loadCell(cellKey);
+      if (cellModified(cellKey)) {
+        // MEMENTO PATTERN: Restore from persistent storage
+        const savedTokens = loadCellState(cellKey);
 
         savedTokens.forEach((token) => {
           const freshToken = {
@@ -258,6 +406,7 @@ function updateVisibleCells() {
           spawnToken(freshToken, true);
         });
       } else {
+        // FLYWEIGHT PATTERN: Generate fresh cell
         if (luck([i, j].toString()) < CACHE_SPAWN_PROBABILITY) {
           const token = createToken(i, j);
           spawnToken(token, false);
@@ -272,11 +421,14 @@ function updateVisibleCells() {
   visibleBounds.jMax = newBounds.jMax;
 }
 
-// Drop token function
+// Function for when the player drops token
 function dropToken() {
   if (!heldToken) return;
 
-  const playerCell = convertLatLong(map.getCenter().lat, map.getCenter().lng);
+  const position = movementController.getCurrentPosition();
+  if (!position) return;
+
+  const playerCell = convertLatLong(position.lat, position.lng);
   const droppedToken: Token = {
     ...heldToken,
     i: playerCell.i,
@@ -286,14 +438,16 @@ function dropToken() {
 
   const cellKey = getCellKey(playerCell);
 
+  // Add to active display
   spawnToken(droppedToken, true);
 
   // MEMENTO: Save to persistent storage
   const cellData = activeCells.get(cellKey)!;
-  saveCell(cellKey, cellData.tokens);
+  saveCellState(cellKey, cellData.tokens);
 
   heldToken = null;
   updateInventory();
+  saveGameState();
 }
 
 // Function to update the inventory of player
@@ -315,7 +469,8 @@ function updateInventory() {
     statusPanelDiv.appendChild(emptyLabel);
   }
 }
-// Combining token function
+
+// Function for combining tokens
 function combineTokens(target: Token) {
   if (!heldToken || heldToken.value !== target.value) return;
 
@@ -342,14 +497,34 @@ function combineTokens(target: Token) {
 
   spawnToken(combinedToken, true);
 
-  saveCell(cellKey, activeCells.get(cellKey)!.tokens);
+  // MEMENTO: Save updated state
+  saveCellState(cellKey, activeCells.get(cellKey)!.tokens);
 
   heldToken = null;
   updateInventory();
+  saveGameState();
 
-  if (combinedValue >= 16) {
+  if (combinedValue >= 64) {
     alert(`🎉 You reached the maximum value: ${combinedValue}! You win!`);
   }
+}
+
+// Initialize movement based on URL parameter or default
+function initializeMovementController() {
+  const urlParams = new URLSearchParams(globalThis.location.search);
+  const movementParam = urlParams.get("movement");
+
+  if (movementParam === "geolocation") {
+    currentMovementType = "geolocation";
+  }
+
+  if (currentMovementType === "geolocation") {
+    movementController = new GeolocationMovementController(CLASSROOM_LATLNG);
+  } else {
+    movementController = new ButtonMovementController(CLASSROOM_LATLNG);
+  }
+
+  movementController.start();
 }
 
 // Movement buttons
@@ -373,17 +548,204 @@ function createMovementButtons() {
     button.textContent = dir.name;
     button.style.margin = "5px";
     button.onclick = () => {
-      const currentCenter = map.getCenter();
-      map.setView([currentCenter.lat + dir.lat, currentCenter.lng + dir.lng]);
+      const currentPosition = movementController.getCurrentPosition();
+      if (
+        currentPosition &&
+        movementController instanceof ButtonMovementController
+      ) {
+        const newPosition = leaflet.latLng(
+          currentPosition.lat + dir.lat,
+          currentPosition.lng + dir.lng,
+        );
+        (movementController as ButtonMovementController).setCurrentPosition(
+          newPosition,
+        );
+        playerLocation.setLatLng(newPosition);
+        map.setView(newPosition);
+        updateVisibleCells();
+        saveGameState();
+      }
     };
     buttonContainer.appendChild(button);
   });
 
+  // Add movement type switcher
+  const switchButton = document.createElement("button");
+  switchButton.textContent = `Switch to ${
+    currentMovementType === "buttons" ? "Geolocation" : "Buttons"
+  }`;
+  switchButton.style.margin = "5px";
+  switchButton.onclick = switchMovementType;
+  buttonContainer.appendChild(switchButton);
+
+  // Add new game button
+  const newGameButton = document.createElement("button");
+  newGameButton.textContent = "New Game";
+  newGameButton.style.margin = "5px";
+  newGameButton.onclick = startNewGame;
+  buttonContainer.appendChild(newGameButton);
+
   document.body.appendChild(buttonContainer);
+  updateMovementUI();
 }
 
-createMovementButtons();
-updateVisibleCells();
-updateInventory();
+// Switch between movement types
+function switchMovementType(): void {
+  movementController.stop();
 
-map.on("moveend", updateVisibleCells);
+  if (currentMovementType === "buttons") {
+    currentMovementType = "geolocation";
+    movementController = new GeolocationMovementController(
+      movementController.getCurrentPosition() || CLASSROOM_LATLNG,
+    );
+  } else {
+    currentMovementType = "buttons";
+    movementController = new ButtonMovementController(
+      movementController.getCurrentPosition() || CLASSROOM_LATLNG,
+    );
+  }
+
+  movementController.start();
+  updateMovementUI();
+  saveGameState();
+}
+
+// Update movement UI
+function updateMovementUI(): void {
+  const buttons = document.querySelectorAll("#movementButtons button");
+  const switchButton = buttons[buttons.length - 2] as HTMLButtonElement;
+  if (switchButton) {
+    switchButton.textContent = `Switch to ${
+      currentMovementType === "buttons" ? "Geolocation" : "Buttons"
+    }`;
+  }
+
+  // Show/hide directional buttons based on movement type
+  const directionButtons = document.querySelectorAll(
+    "#movementButtons button:not(:last-child):not(:nth-last-child(2))",
+  );
+  directionButtons.forEach((button) => {
+    (button as HTMLElement).style.display = currentMovementType === "buttons"
+      ? "inline-block"
+      : "none";
+  });
+}
+
+// Save game state
+function saveGameState(): void {
+  const position = movementController.getCurrentPosition();
+  const gameState: GameState = {
+    persistentCells: Array.from(persistentCells.entries()),
+    playerPosition: position
+      ? { lat: position.lat, lng: position.lng }
+      : { lat: CLASSROOM_LATLNG.lat, lng: CLASSROOM_LATLNG.lng },
+    heldToken: heldToken
+      ? {
+        id: heldToken.id,
+        value: heldToken.value,
+        i: heldToken.i,
+        j: heldToken.j,
+      }
+      : null,
+    movementType: currentMovementType,
+  };
+
+  GameStorage.saveGameState(gameState);
+}
+
+// Load game state
+function loadGameState(): boolean {
+  const savedState = GameStorage.loadGameState();
+  if (!savedState) return false;
+
+  // Restore persistent cells
+  persistentCells.clear();
+  savedState.persistentCells.forEach(([key, state]) => {
+    persistentCells.set(key, state);
+  });
+
+  // Restore player position
+  if (savedState.playerPosition) {
+    const position = leaflet.latLng(
+      savedState.playerPosition.lat,
+      savedState.playerPosition.lng,
+    );
+    if (movementController instanceof ButtonMovementController) {
+      movementController.setCurrentPosition(position);
+    }
+    playerLocation.setLatLng(position);
+    map.setView(position);
+  }
+
+  // Restore held token
+  heldToken = savedState.heldToken;
+
+  // Restore movement type
+  currentMovementType = savedState.movementType;
+
+  updateInventory();
+  updateVisibleCells();
+  updateMovementUI();
+
+  console.log("Game state loaded");
+  return true;
+}
+
+// Start new game
+function startNewGame(): void {
+  if (
+    confirm(
+      "Are you sure you want to start a new game? All progress will be lost.",
+    )
+  ) {
+    // Clear persistent state
+    persistentCells.clear();
+    heldToken = null;
+
+    // Reset position
+    const position = CLASSROOM_LATLNG;
+    if (movementController instanceof ButtonMovementController) {
+      movementController.setCurrentPosition(position);
+    }
+    playerLocation.setLatLng(position);
+    map.setView(position);
+
+    // Clear storage
+    GameStorage.clearGameState();
+
+    // Reset UI
+    updateInventory();
+    updateVisibleCells();
+
+    console.log("New game started");
+  }
+}
+
+// Initialize the game
+function initializeGame() {
+  createMovementButtons();
+  initializeMovementController();
+
+  // Try to load saved game, otherwise start fresh
+  if (!loadGameState()) {
+    updateVisibleCells();
+  }
+
+  updateInventory();
+
+  // Auto-save every 30 seconds
+  setInterval(saveGameState, 30000);
+}
+
+initializeGame();
+
+// Save game state when page is about to close
+globalThis.addEventListener("beforeunload", saveGameState);
+
+// Update map when movement ends (for button movement)
+map.on("moveend", () => {
+  if (currentMovementType === "buttons") {
+    updateVisibleCells();
+    saveGameState();
+  }
+});

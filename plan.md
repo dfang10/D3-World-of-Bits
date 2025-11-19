@@ -41,10 +41,10 @@ Key gameplay challenge: Can players collect and craft tokens from nearby locatio
 
 ## D4.d: Gameplay Across Real-world Space and Time
 
-- [] implement geolocation API, player moves based off real world movement
-- [] use the facade pattern to implement geolocation movement
-- [] use localStorage API to save the game when closed and refreshed
-- [] add a way for the player to restart their progress
-- [] add buttons so the player can choose which types of movement they want
+- [x] implement geolocation API, player moves based off real world movement
+- [x] use the facade pattern to implement geolocation movement
+- [x] use localStorage API to save the game when closed and refreshed
+- [x] add a way for the player to restart their progress
+- [x] add buttons so the player can choose which types of movement they want
 
 ### 
